@@ -12,8 +12,9 @@ def init_db():
     with sqlite3.connect(DB_NAME) as conn:
         conn.execute('''
             CREATE TABLE IF NOT EXISTS grapes (
-                id INTEGER PRIMARY KEY,
-                data TEXT NOT NULL
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                root TEXT NOT NULL,
+                raw TEXT NOT NULL
             )
         ''')
         conn.commit()
@@ -36,6 +37,9 @@ class Node(BaseModel):
     outputs: List[str]
     next: Optional[int] = None
 
+class GrapeCreate(BaseModel):
+    root: List[Node]
+
 class Grape(BaseModel):
     id: int
     root: List[Node]
@@ -51,18 +55,23 @@ class GrapeResponse(StandardResponse):
 class GrapesResponse(StandardResponse):
     grapes: List[Grape]
 
-
 @app.post("/grapes", response_model=StandardResponse)
-def create_grape(grape: Grape, db: sqlite3.Connection = Depends(get_db)):
-    grape_json_str = grape.model_dump_json()
+def create_grape(grape_in: GrapeCreate, db: sqlite3.Connection = Depends(get_db)):
+    raw_str = "ㅗ"
+    
+    root_json = json.dumps([node.model_dump() for node in grape_in.root])
     
     try:
-        db.execute(
-            "REPLACE INTO grapes (id, data) VALUES (?, ?)",
-            (grape.id, grape_json_str)
+        cursor = db.execute(
+            "INSERT INTO grapes (root, raw) VALUES (?, ?)",
+            (root_json, raw_str)
         )
         db.commit()
-        return {"ok": True, "message": f"Grape {grape.id} saved successfully."}
+        
+        new_id = cursor.lastrowid
+        
+        return {"ok": True, "message": f"Grape {new_id} saved successfully."}
+    
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
@@ -70,11 +79,15 @@ def create_grape(grape: Grape, db: sqlite3.Connection = Depends(get_db)):
 
 @app.get("/grapes/{grape_id}", response_model=GrapeResponse)
 def get_grape(grape_id: int, db: sqlite3.Connection = Depends(get_db)):
-    cursor = db.execute("SELECT data FROM grapes WHERE id = ?", (grape_id,))
+    cursor = db.execute("SELECT id, root, raw FROM grapes WHERE id = ?", (grape_id,))
     row = cursor.fetchone()
     
     if not row:
         return {"ok": False, "message": "Grape not found.", "grape": None}
     
-    grape_data = json.loads(row["data"])
+    grape_data = {
+        "id": row["id"],
+        "root": json.loads(row["root"]),
+        "raw": row["raw"]
+    }
     return {"ok": True, "message": "Success", "grape": grape_data}
