@@ -37,9 +37,6 @@ class Node(BaseModel):
     outputs: List[str]
     next: Optional[int] = None
 
-class GrapeCreate(BaseModel):
-    root: List[Node]
-
 class Grape(BaseModel):
     id: int
     root: List[Node]
@@ -56,25 +53,29 @@ class GrapesResponse(StandardResponse):
     grapes: List[Grape]
 
 @app.post("/grapes", response_model=StandardResponse)
-def create_grape(grape_in: GrapeCreate, db: sqlite3.Connection = Depends(get_db)):
+def create_grape(grape_in: List[Node], db: sqlite3.Connection = Depends(get_db)):
     raw_str = "ㅗ"
-    
-    root_json = json.dumps([node.model_dump() for node in grape_in.root])
-    
+
+    root_json = json.dumps([node.model_dump() for nod in grape_in])
+
     try:
         cursor = db.execute(
             "INSERT INTO grapes (root, raw) VALUES (?, ?)",
             (root_json, raw_str)
         )
         db.commit()
-        
         new_id = cursor.lastrowid
-        
-        return {"ok": True, "message": f"Grape {new_id} saved successfully."}
+        return {
+            "ok": True,
+            "message": f"Grape {new_id} saved successfully."
+        }
     
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+        raise HTTPException(
+            status_code = 500,
+            detail = f"Database Error: {str(e)}"
+        )
 
 
 @app.get("/grapes/{grape_id}", response_model=GrapeResponse)
@@ -83,11 +84,18 @@ def get_grape(grape_id: int, db: sqlite3.Connection = Depends(get_db)):
     row = cursor.fetchone()
     
     if not row:
-        return {"ok": False, "message": "Grape not found.", "grape": None}
+        return {
+            "ok": False,
+            "message": "Grape not found.",
+            "grape": None}
     
     grape_data = {
         "id": row["id"],
         "root": json.loads(row["root"]),
         "raw": row["raw"]
     }
-    return {"ok": True, "message": "Success", "grape": grape_data}
+    return {
+        "ok": True,
+        "message": "Success",
+        "grape": grape_data
+    }  
