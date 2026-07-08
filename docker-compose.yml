@@ -2,12 +2,12 @@ version: "3.8"
 
 services:
   backend:
-    build:
+    build: .
     container_name: toolnet-be-dev
     ports:
-    - "8000:8000"
+      - "8000:8000"
     env_file:
-    - .env
+      - .env
     volumes:
       - ./Grape.db:/app/Grape.db
     depends_on:
@@ -19,4 +19,4 @@ services:
     container_name: toolnet-redis
     ports:
       - "6379:6379"
-    resstart: unless-stopped
+    restart: unless-stopped
