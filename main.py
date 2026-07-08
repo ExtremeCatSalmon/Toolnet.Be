@@ -118,6 +118,8 @@ class GrapesResponse(StandardResponse):
 
 class EmailRequest(BaseModel):
     email: EmailStr
+PAGE_SIZE = 5
+
 
 class VerifyRequest(BaseModel):
     email: EmailStr
