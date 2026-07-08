@@ -118,6 +118,8 @@ class GrapesResponse(StandardResponse):
 
 class EmailRequest(BaseModel):
     email: EmailStr
+PAGE_SIZE = 5
+
 
 class VerifyRequest(BaseModel):
     email: EmailStr
@@ -170,6 +172,9 @@ def verify_code(req: VerifyRequest):
         "message": "이메일 인증이 완료되었습니다.",
         "access_token": access_token
     }
+
+PAGE_SIZE = 5
+
 
 @app.post("/grapes", response_model=StandardResponse)
 def create_grape(grape_in: List[Node], db: sqlite3.Connection = Depends(get_db), current_user: str = Depends(get_current_user)):
