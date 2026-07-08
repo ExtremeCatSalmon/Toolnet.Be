@@ -51,6 +51,8 @@ class GrapeResponse(StandardResponse):
 class GrapesResponse(StandardResponse):
     grapes: List[Grape]
 
+PAGE_SIZE = 5
+
 
 @app.post("/grapes", response_model=StandardResponse)
 def create_grape(grape: Grape, db: sqlite3.Connection = Depends(get_db)):
