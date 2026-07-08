@@ -1,5 +1,5 @@
-from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, Request
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, Request, Response
+from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import List, Optional
@@ -40,8 +40,6 @@ redis_client = redis.Redis(
     decode_responses=True
 )
 
-security = HTTPBearer(auto_error=False)
-
 def create_access_token(data: dict) -> str:
     to_encode = data.copy()
     expire = datetime.utcnow() + timedelta(minutes=settings.JWT_EXPIRATION_MINUTES)
@@ -49,11 +47,11 @@ def create_access_token(data: dict) -> str:
     encoded_jwt = jwt.encode(to_encode, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
     return encoded_jwt
 
-def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
-    if not credentials:
+def get_current_user(request: Request) -> str:
+    token = request.cookies.get("access_token")
+    if not token:
         raise HTTPException(status_code=401, detail="Unauthorized: 인증 토큰이 필요합니다.")
     
-    token = credentials.credentials
     try:
         payload = jwt.decode(token, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM])
         email: str = payload.get("sub")
@@ -107,9 +105,6 @@ class StandardResponse(BaseModel):
     ok: bool
     message: str
 
-class TokenResponse(StandardResponse):
-    access_token: Optional[str] = None
-
 class GrapeResponse(StandardResponse):
     grape: Optional[Grape] = None
 
@@ -118,8 +113,6 @@ class GrapesResponse(StandardResponse):
 
 class EmailRequest(BaseModel):
     email: EmailStr
-PAGE_SIZE = 5
-
 
 class VerifyRequest(BaseModel):
     email: EmailStr
@@ -153,28 +146,34 @@ def send_code(req: EmailRequest, background_tasks: BackgroundTasks):
     except Exception:
         raise HTTPException(status_code=500, detail="이메일 발송에 실패했습니다.")
 
-@app.post("/auth/verify-code", response_model=TokenResponse)
-def verify_code(req: VerifyRequest):
+@app.post("/auth/verify-code", response_model=StandardResponse)
+def verify_code(req: VerifyRequest, response: Response):
     stored_code = redis_client.get(req.email)
     
     if not stored_code:
-        return {"ok": False, "message": "인증 번호가 만료되었거나 존재하지 않습니다.", "access_token": None}
+        return {"ok": False, "message": "인증 번호가 만료되었거나 존재하지 않습니다."}
     
     if stored_code != req.code:
-        return {"ok": False, "message": "잘못된 인증 번호입니다.", "access_token": None}
+        return {"ok": False, "message": "잘못된 인증 번호입니다."}
     
     redis_client.delete(req.email)
     
     access_token = create_access_token(data={"sub": req.email})
     
+    response.set_cookie(
+        key="access_token",
+        value=access_token,
+        httponly=True,
+        max_age=settings.JWT_EXPIRATION_MINUTES * 60,
+        samesite="lax"
+    )
+    
     return {
         "ok": True, 
-        "message": "이메일 인증이 완료되었습니다.",
-        "access_token": access_token
+        "message": "이메일 인증이 완료되었습니다."
     }
 
 PAGE_SIZE = 5
-
 
 @app.post("/grapes", response_model=StandardResponse)
 def create_grape(grape_in: List[Node], db: sqlite3.Connection = Depends(get_db), current_user: str = Depends(get_current_user)):
