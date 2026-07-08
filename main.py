@@ -1,15 +1,72 @@
-from fastapi import FastAPI, HTTPException, Depends
-from pydantic import BaseModel
+from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, Request
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from pydantic import BaseModel, EmailStr
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import List, Optional
+from datetime import datetime, timedelta
+import jwt
 import json
 import sqlite3
+import redis
+import random
+import smtplib
+from email.mime.text import MIMEText
 
-app = FastAPI(title="Grape API", description="노드를 연결하여 만든 프로그램(Grape) 관리 API")
+class Settings(BaseSettings):
+    DB_NAME: str
+    REDIS_HOST: str
+    REDIS_PORT: int
+    REDIS_DB: int
+    
+    SMTP_SERVER: str
+    SMTP_PORT: int
+    SMTP_USER: str
+    SMTP_PASSWORD: str
+    
+    JWT_SECRET: str
+    JWT_ALGORITHM: str = "HS256"
+    JWT_EXPIRATION_MINUTES: int = 60 * 24
 
-DB_NAME = "Grape.db"
+    model_config = SettingsConfigDict(env_file=".env")
+
+settings = Settings()
+
+app = FastAPI(title="Grape API", description="노드를 연결하여 만든 프로그램(Grape) 및 이메일/JWT 인증 관리 API")
+
+redis_client = redis.Redis(
+    host=settings.REDIS_HOST, 
+    port=settings.REDIS_PORT, 
+    db=settings.REDIS_DB, 
+    decode_responses=True
+)
+
+security = HTTPBearer(auto_error=False)
+
+def create_access_token(data: dict) -> str:
+    to_encode = data.copy()
+    expire = datetime.utcnow() + timedelta(minutes=settings.JWT_EXPIRATION_MINUTES)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
+    return encoded_jwt
+
+def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
+    if not credentials:
+        raise HTTPException(status_code=401, detail="Unauthorized: 인증 토큰이 필요합니다.")
+    
+    token = credentials.credentials
+    try:
+        payload = jwt.decode(token, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM])
+        email: str = payload.get("sub")
+        if email is None:
+            raise HTTPException(status_code=401, detail="Unauthorized: 유효하지 않은 토큰입니다.")
+        return email
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Unauthorized: 토큰이 만료되었습니다.")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Unauthorized: 유효하지 않은 토큰입니다.")
 
 def init_db():
-    with sqlite3.connect(DB_NAME) as conn:
+    with sqlite3.connect(settings.DB_NAME) as conn:
         conn.execute('''
             CREATE TABLE IF NOT EXISTS grapes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -22,9 +79,13 @@ def init_db():
 @app.on_event("startup")
 def on_startup():
     init_db()
+    try:
+        redis_client.ping()
+    except redis.ConnectionError:
+        print("Redis 서버에 연결할 수 없습니다. Redis가 실행 중인지 확인하세요.")
 
 def get_db():
-    conn = sqlite3.connect(DB_NAME)
+    conn = sqlite3.connect(settings.DB_NAME)
     conn.row_factory = sqlite3.Row
     try:
         yield conn
@@ -46,21 +107,77 @@ class StandardResponse(BaseModel):
     ok: bool
     message: str
 
+class TokenResponse(StandardResponse):
+    access_token: Optional[str] = None
+
 class GrapeResponse(StandardResponse):
     grape: Optional[Grape] = None
 
 class GrapesResponse(StandardResponse):
     grapes: List[Grape]
 
+class EmailRequest(BaseModel):
+    email: EmailStr
+
+class VerifyRequest(BaseModel):
+    email: EmailStr
+    code: str
+
+def send_verification_email(email_to: str, code: str):
+    msg = MIMEText(f"인증 번호는 [{code}] 입니다.\n해당 인증 번호는 3분 동안 유효합니다.")
+    msg['Subject'] = 'Grape API 이메일 인증 번호'
+    msg['From'] = settings.SMTP_USER
+    msg['To'] = email_to
+
+    try:
+        with smtplib.SMTP(settings.SMTP_SERVER, settings.SMTP_PORT) as server:
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+            server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
+            server.send_message(msg)
+    except Exception as e:
+        print(f"이메일 발송 실패: {e}")
+        raise e
+
+@app.post("/auth/send-code", response_model=StandardResponse)
+def send_code(req: EmailRequest, background_tasks: BackgroundTasks):
+    verification_code = str(random.randint(100000, 999999))
+    redis_client.setex(name=req.email, time=180, value=verification_code)
+    
+    try:
+        background_tasks.add_task(send_verification_email, req.email, verification_code)
+        return {"ok": True, "message": "인증 번호가 이메일로 발송되었습니다. 3분 안에 입력해주세요."}
+    except Exception:
+        raise HTTPException(status_code=500, detail="이메일 발송에 실패했습니다.")
+
+@app.post("/auth/verify-code", response_model=TokenResponse)
+def verify_code(req: VerifyRequest):
+    stored_code = redis_client.get(req.email)
+    
+    if not stored_code:
+        return {"ok": False, "message": "인증 번호가 만료되었거나 존재하지 않습니다.", "access_token": None}
+    
+    if stored_code != req.code:
+        return {"ok": False, "message": "잘못된 인증 번호입니다.", "access_token": None}
+    
+    redis_client.delete(req.email)
+    
+    access_token = create_access_token(data={"sub": req.email})
+    
+    return {
+        "ok": True, 
+        "message": "이메일 인증이 완료되었습니다.",
+        "access_token": access_token
+    }
 
 PAGE_SIZE = 5
 
 
 @app.post("/grapes", response_model=StandardResponse)
-def create_grape(grape_in: List[Node], db: sqlite3.Connection = Depends(get_db)):
+def create_grape(grape_in: List[Node], db: sqlite3.Connection = Depends(get_db), current_user: str = Depends(get_current_user)):
     raw_str = "ㅗ"
-
-    root_json = json.dumps([node.model_dump() for nod in grape_in])
+    root_json = json.dumps([node.model_dump() for node in grape_in])
 
     try:
         cursor = db.execute(
@@ -71,7 +188,7 @@ def create_grape(grape_in: List[Node], db: sqlite3.Connection = Depends(get_db))
         new_id = cursor.lastrowid
         return {
             "ok": True,
-            "message": f"Grape {new_id} saved successfully."
+            "message": f"Grape {new_id} saved successfully by {current_user}." 
         }
     
     except Exception as e:
@@ -80,7 +197,6 @@ def create_grape(grape_in: List[Node], db: sqlite3.Connection = Depends(get_db))
             status_code = 500,
             detail = f"Database Error: {str(e)}"
         )
-
 
 @app.get("/grapes/{grape_id}", response_model=GrapeResponse)
 def get_grape(grape_id: int, db: sqlite3.Connection = Depends(get_db)):
@@ -102,4 +218,40 @@ def get_grape(grape_id: int, db: sqlite3.Connection = Depends(get_db)):
         "ok": True,
         "message": "Success",
         "grape": grape_data
-    }  
+    }
+
+@app.get("/grapes", response_model=GrapesResponse)
+def get_grapes_list(page: int = 1, size: int = 10, db: sqlite3.Connection = Depends(get_db)):
+    if page < 1:
+        page = 1
+    if size < 1:
+        size = 10
+        
+    offset = (page - 1) * size
+    
+    try:
+        cursor = db.execute(
+            "SELECT id, root, raw FROM grapes ORDER BY id DESC LIMIT ? OFFSET ?", 
+            (size, offset)
+        )
+        rows = cursor.fetchall()
+        
+        grapes_list = []
+        for row in rows:
+            grapes_list.append({
+                "id": row["id"],
+                "root": json.loads(row["root"]),
+                "raw": row["raw"]
+            })
+            
+        return {
+            "ok": True,
+            "message": "Success",
+            "grapes": grapes_list
+        }
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Database Error: {str(e)}"
+        )
