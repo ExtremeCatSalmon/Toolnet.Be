@@ -12,9 +12,8 @@ def init_db():
     with sqlite3.connect(DB_NAME) as conn:
         conn.execute('''
             CREATE TABLE IF NOT EXISTS grapes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                root TEXT NOT NULL,
-                raw TEXT NOT NULL
+                id INTEGER PRIMARY KEY,
+                data TEXT NOT NULL
             )
         ''')
         conn.commit()
@@ -52,50 +51,32 @@ class GrapeResponse(StandardResponse):
 class GrapesResponse(StandardResponse):
     grapes: List[Grape]
 
+PAGE_SIZE = 5
+
+
 @app.post("/grapes", response_model=StandardResponse)
-def create_grape(grape_in: List[Node], db: sqlite3.Connection = Depends(get_db)):
-    raw_str = "ㅗ"
-
-    root_json = json.dumps([node.model_dump() for nod in grape_in])
-
+def create_grape(grape: Grape, db: sqlite3.Connection = Depends(get_db)):
+    grape_json_str = grape.model_dump_json()
+    
     try:
-        cursor = db.execute(
-            "INSERT INTO grapes (root, raw) VALUES (?, ?)",
-            (root_json, raw_str)
+        db.execute(
+            "REPLACE INTO grapes (id, data) VALUES (?, ?)",
+            (grape.id, grape_json_str)
         )
         db.commit()
-        new_id = cursor.lastrowid
-        return {
-            "ok": True,
-            "message": f"Grape {new_id} saved successfully."
-        }
-    
+        return {"ok": True, "message": f"Grape {grape.id} saved successfully."}
     except Exception as e:
         db.rollback()
-        raise HTTPException(
-            status_code = 500,
-            detail = f"Database Error: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
 
 @app.get("/grapes/{grape_id}", response_model=GrapeResponse)
 def get_grape(grape_id: int, db: sqlite3.Connection = Depends(get_db)):
-    cursor = db.execute("SELECT id, root, raw FROM grapes WHERE id = ?", (grape_id,))
+    cursor = db.execute("SELECT data FROM grapes WHERE id = ?", (grape_id,))
     row = cursor.fetchone()
     
     if not row:
-        return {
-            "ok": False,
-            "message": "Grape not found.",
-            "grape": None}
+        return {"ok": False, "message": "Grape not found.", "grape": None}
     
-    grape_data = {
-        "id": row["id"],
-        "root": json.loads(row["root"]),
-        "raw": row["raw"]
-    }
-    return {
-        "ok": True,
-        "message": "Success",
-        "grape": grape_data
-    }  
+    grape_data = json.loads(row["data"])
+    return {"ok": True, "message": "Success", "grape": grape_data}
