@@ -171,6 +171,9 @@ def verify_code(req: VerifyRequest):
         "access_token": access_token
     }
 
+PAGE_SIZE = 5
+
+
 @app.post("/grapes", response_model=StandardResponse)
 def create_grape(grape_in: List[Node], db: sqlite3.Connection = Depends(get_db), current_user: str = Depends(get_current_user)):
     raw_str = "ㅗ"
