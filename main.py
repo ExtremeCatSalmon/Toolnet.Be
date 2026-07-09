@@ -95,8 +95,7 @@ class GrapeMeta(BaseModel):
     name: str
     description: str
 
-class NodeId(int):
-    pass
+NodeId = NewType('NodeId', int)
 
 class Node(BaseModel):
     id: NodeId
@@ -104,8 +103,7 @@ class Node(BaseModel):
     sans: List[List[str]]
     next: Optional[int] = None
 
-class GrapeId(int):
-    pass
+GrapeId = NewType('GrapeId', int)
 
 class Grape(BaseModel):
     id: GrapeId
