@@ -1,6 +1,6 @@
 name: Backend CD
 
-on:
+"on":
   workflow_run:
     workflows:
       - Backend CI
