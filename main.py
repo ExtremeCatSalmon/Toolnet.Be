@@ -1,8 +1,8 @@
-from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, Request, Response
+from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, Request, Response, Query
 from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from typing import List, Optional
+from typing import List, Optional, Any
 from datetime import datetime, timedelta
 import jwt
 import json
@@ -68,7 +68,8 @@ def init_db():
         conn.execute('''
             CREATE TABLE IF NOT EXISTS grapes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                root TEXT NOT NULL,
+                meta TEXT NOT NULL,
+                nodes TEXT NOT NULL,
                 raw TEXT NOT NULL
             )
         ''')
@@ -90,15 +91,25 @@ def get_db():
     finally:
         conn.close()
 
+class GrapeMeta(BaseModel):
+    name: str
+    description: str
+
 class Node(BaseModel):
     id: int
-    inputs: List[str]
-    outputs: List[str]
+    name: str
+    sans: List[List[str]]
     next: Optional[int] = None
 
 class Grape(BaseModel):
     id: int
-    root: List[Node]
+    meta: GrapeMeta
+    nodes: List[Node]
+    raw: str
+
+class GrapeCreateRequest(BaseModel):
+    meta: GrapeMeta
+    nodes: List[Node]
     raw: str
 
 class StandardResponse(BaseModel):
@@ -106,10 +117,10 @@ class StandardResponse(BaseModel):
     message: str
 
 class GrapeResponse(StandardResponse):
-    grape: Optional[Grape] = None
+    data: Optional[Grape] = None
 
 class GrapesResponse(StandardResponse):
-    grapes: List[Grape]
+    data: List[Grape] = []
 
 class EmailRequest(BaseModel):
     email: EmailStr
@@ -173,17 +184,17 @@ def verify_code(req: VerifyRequest, response: Response):
         "message": "이메일 인증이 완료되었습니다."
     }
 
-PAGE_SIZE = 5
+PAGE_SIZE = 10
 
 @app.post("/grapes", response_model=StandardResponse)
-def create_grape(grape_in: List[Node], db: sqlite3.Connection = Depends(get_db), current_user: str = Depends(get_current_user)):
-    raw_str = "ㅗ"
-    root_json = json.dumps([node.model_dump() for node in grape_in])
+def create_grape(req: GrapeCreateRequest, db: sqlite3.Connection = Depends(get_db), current_user: str = Depends(get_current_user)):
+    meta_json = req.meta.model_dump_json()
+    nodes_json = json.dumps([node.model_dump() for node in req.nodes])
 
     try:
         cursor = db.execute(
-            "INSERT INTO grapes (root, raw) VALUES (?, ?)",
-            (root_json, raw_str)
+            "INSERT INTO grapes (meta, nodes, raw) VALUES (?, ?, ?)",
+            (meta_json, nodes_json, req.raw)
         )
         db.commit()
         new_id = cursor.lastrowid
@@ -195,45 +206,53 @@ def create_grape(grape_in: List[Node], db: sqlite3.Connection = Depends(get_db),
     except Exception as e:
         db.rollback()
         raise HTTPException(
-            status_code = 500,
-            detail = f"Database Error: {str(e)}"
+            status_code=500,
+            detail=f"Database Error: {str(e)}"
         )
 
 @app.get("/grapes/{grape_id}", response_model=GrapeResponse)
 def get_grape(grape_id: int, db: sqlite3.Connection = Depends(get_db)):
-    cursor = db.execute("SELECT id, root, raw FROM grapes WHERE id = ?", (grape_id,))
+    cursor = db.execute("SELECT id, meta, nodes, raw FROM grapes WHERE id = ?", (grape_id,))
     row = cursor.fetchone()
     
     if not row:
         return {
             "ok": False,
             "message": "Grape not found.",
-            "grape": None}
+            "data": None
+        }
     
     grape_data = {
         "id": row["id"],
-        "root": json.loads(row["root"]),
+        "meta": json.loads(row["meta"]),
+        "nodes": json.loads(row["nodes"]),
         "raw": row["raw"]
     }
     return {
         "ok": True,
         "message": "Success",
-        "grape": grape_data
+        "data": grape_data
     }
 
+PAGE_SIZE = 10
+
 @app.get("/grapes", response_model=GrapesResponse)
-def get_grapes_list(page: int = 1, size: int = 10, db: sqlite3.Connection = Depends(get_db)):
+def get_grapes_list(
+    page: int = Query(..., description="몇번째 패이지 요청인가?"),
+    user: Optional[str] = Query(None, description="어떤 유저의 노드에 대한 요청인가?"),
+    sort: Optional[int] = Query(None, description="정렬 방식"),
+    sort_data: Optional[str] = Query(None, alias="sort-data", description="정렬 기준"),
+    db: sqlite3.Connection = Depends(get_db)
+):
     if page < 1:
         page = 1
-    if size < 1:
-        size = 10
         
-    offset = (page - 1) * size
+    offset = (page - 1) * PAGE_SIZE
     
     try:
         cursor = db.execute(
-            "SELECT id, root, raw FROM grapes ORDER BY id DESC LIMIT ? OFFSET ?", 
-            (size, offset)
+            "SELECT id, meta, nodes, raw FROM grapes ORDER BY id DESC LIMIT ? OFFSET ?", 
+            (PAGE_SIZE, offset)
         )
         rows = cursor.fetchall()
         
@@ -241,14 +260,15 @@ def get_grapes_list(page: int = 1, size: int = 10, db: sqlite3.Connection = Depe
         for row in rows:
             grapes_list.append({
                 "id": row["id"],
-                "root": json.loads(row["root"]),
+                "meta": json.loads(row["meta"]),
+                "nodes": json.loads(row["nodes"]),
                 "raw": row["raw"]
             })
             
         return {
             "ok": True,
             "message": "Success",
-            "grapes": grapes_list
+            "data": grapes_list
         }
         
     except Exception as e:
