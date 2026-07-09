@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, Request, R
 from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from typing import List, Optional, NewType
+from typing import List, Optional, NewType, Tuple
 from datetime import datetime, timedelta
 import jwt
 import json
@@ -68,9 +68,12 @@ def init_db():
         conn.execute('''
             CREATE TABLE IF NOT EXISTS grapes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user TEXT,
                 meta TEXT NOT NULL,
                 nodes TEXT NOT NULL,
-                raw TEXT NOT NULL
+                raw TEXT NOT NULL,
+                downloads INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
         conn.commit()
@@ -100,7 +103,7 @@ NodeId = NewType('NodeId', int)
 class Node(BaseModel):
     id: NodeId
     name: str
-    sans: List[List[str]]
+    sans: List[Tuple[str, str]]
     next: Optional[int] = None
 
 GrapeId = NewType('GrapeId', int)
@@ -197,8 +200,8 @@ def create_grape(req: GrapeCreateRequest, db: sqlite3.Connection = Depends(get_d
 
     try:
         cursor = db.execute(
-            "INSERT INTO grapes (meta, nodes, raw) VALUES (?, ?, ?)",
-            (meta_json, nodes_json, req.raw)
+            "INSERT INTO grapes (user, meta, nodes, raw) VALUES (?, ?, ?, ?)",
+            (current_user, meta_json, nodes_json, req.raw)
         )
         db.commit()
         new_id = cursor.lastrowid
@@ -238,14 +241,11 @@ def get_grape(grape_id: int, db: sqlite3.Connection = Depends(get_db)):
         "data": grape_data
     }
 
-PAGE_SIZE = 10
-
 @app.get("/grapes", response_model=GrapesResponse)
 def get_grapes_list(
-    page: int = Query(..., description="몇번째 패이지 요청인가?"),
+    page: int = Query(..., description="몇번째 페이지 요청인가?"),
     user: Optional[str] = Query(None, description="어떤 유저의 노드에 대한 요청인가?"),
-    sort: Optional[int] = Query(None, description="정렬 방식"),
-    sort_data: Optional[str] = Query(None, alias="sort-data", description="정렬 기준"),
+    sort: Optional[int] = Query(None, description="정렬 방식 (0:오래된순, 1:최신순, 2:다운로드 적은순, 3:다운로드 많은순)"),
     db: sqlite3.Connection = Depends(get_db)
 ):
     if page < 1:
@@ -253,11 +253,32 @@ def get_grapes_list(
         
     offset = (page - 1) * PAGE_SIZE
     
+    query_parts = ["SELECT id, meta, nodes, raw FROM grapes"]
+    conditions = []
+    params = []
+    
+    if user:
+        conditions.append("user = ?")
+        params.append(user)
+        
+    if conditions:
+        query_parts.append("WHERE " + " AND ".join(conditions))
+        
+    sort_mapping = {
+        0: "id ASC",
+        1: "id DESC",
+        2: "downloads ASC",
+        3: "downloads DESC"
+    }
+    
+    order_by = sort_mapping.get(sort, "id DESC")
+    query_parts.append(f"ORDER BY {order_by} LIMIT ? OFFSET ?")
+    
+    params.extend([PAGE_SIZE, offset])
+    final_query = " ".join(query_parts)
+    
     try:
-        cursor = db.execute(
-            "SELECT id, meta, nodes, raw FROM grapes ORDER BY id DESC LIMIT ? OFFSET ?", 
-            (PAGE_SIZE, offset)
-        )
+        cursor = db.execute(final_query, tuple(params))
         rows = cursor.fetchall()
         
         grapes_list = []
