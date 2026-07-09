@@ -6,13 +6,16 @@ name: Backend CD
       - Backend CI
     types:
       - completed
+  push:
+    branches:
+      - develop
 
 jobs:
   deploy:
     name: Deploy Backend Dev Server
     runs-on: ubuntu-latest
 
-    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'develop' }}
+    if: ${{ github.event_name == 'push' || github.event.workflow_run.conclusion == 'success' }}
 
     steps:
       - name: Deploy to GSM SV
