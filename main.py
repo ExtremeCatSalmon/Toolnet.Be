@@ -63,36 +63,89 @@ def get_current_user(request: Request) -> str:
 
 def init_db():
     with sqlite3.connect(settings.DB_NAME) as conn:
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS users (
-                email TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS grapes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user TEXT,
-                meta TEXT NOT NULL,
-                nodes TEXT NOT NULL,
-                raw TEXT NOT NULL,
-                downloads INTEGER DEFAULT 0,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS node_data (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user TEXT,
-                meta TEXT NOT NULL,
-                type TEXT NOT NULL,
-                inputs TEXT NOT NULL,
-                outputs TEXT NOT NULL,
-                source TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
+        conn.execute("PRAGMA foreign_keys = ON;")
+        
+        cursor = conn.execute("PRAGMA user_version;")
+        current_version = cursor.fetchone()[0]
+        
+        if current_version < 1:
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS users (
+                    email TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS grapes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user TEXT,
+                    meta TEXT NOT NULL,
+                    nodes TEXT NOT NULL,
+                    raw TEXT NOT NULL,
+                    downloads INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(user) REFERENCES users(email) ON DELETE SET NULL
+                )
+            ''')
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS node_data (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user TEXT,
+                    meta TEXT NOT NULL,
+                    type TEXT NOT NULL,
+                    inputs TEXT NOT NULL,
+                    outputs TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(user) REFERENCES users(email) ON DELETE SET NULL
+                )
+            ''')
+            conn.execute("PRAGMA user_version = 2;")
+            current_version = 2
+            
+        if current_version < 2:
+            conn.execute("ALTER TABLE grapes RENAME TO _grapes_old;")
+            conn.execute('''
+                CREATE TABLE grapes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user TEXT,
+                    meta TEXT NOT NULL,
+                    nodes TEXT NOT NULL,
+                    raw TEXT NOT NULL,
+                    downloads INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(user) REFERENCES users(email) ON DELETE SET NULL
+                )
+            ''')
+            conn.execute('''
+                INSERT INTO grapes (id, user, meta, nodes, raw, downloads, created_at)
+                SELECT id, user, meta, nodes, raw, downloads, created_at FROM _grapes_old;
+            ''')
+            conn.execute("DROP TABLE _grapes_old;")
+            
+            conn.execute("ALTER TABLE node_data RENAME TO _node_data_old;")
+            conn.execute('''
+                CREATE TABLE node_data (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user TEXT,
+                    meta TEXT NOT NULL,
+                    type TEXT NOT NULL,
+                    inputs TEXT NOT NULL,
+                    outputs TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(user) REFERENCES users(email) ON DELETE SET NULL
+                )
+            ''')
+            conn.execute('''
+                INSERT INTO node_data (id, user, meta, type, inputs, outputs, source, created_at)
+                SELECT id, user, meta, type, inputs, outputs, source, created_at FROM _node_data_old;
+            ''')
+            conn.execute("DROP TABLE _node_data_old;")
+            
+            conn.execute("PRAGMA user_version = 2;")
+            
         conn.commit()
 
 @app.on_event("startup")
@@ -105,6 +158,7 @@ def on_startup():
 
 def get_db():
     conn = sqlite3.connect(settings.DB_NAME)
+    conn.execute("PRAGMA foreign_keys = ON;")
     conn.row_factory = sqlite3.Row
     try:
         yield conn
