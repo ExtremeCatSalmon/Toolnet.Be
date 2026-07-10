@@ -64,6 +64,13 @@ def get_current_user(request: Request) -> str:
 def init_db():
     with sqlite3.connect(settings.DB_NAME) as conn:
         conn.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                email TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        conn.execute('''
             CREATE TABLE IF NOT EXISTS grapes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user TEXT,
@@ -103,6 +110,7 @@ def get_db():
         yield conn
     finally:
         conn.close()
+
 class GrapeMeta(BaseModel):
     name: str
     description: str
@@ -171,7 +179,12 @@ class NodeDataListResponse(StandardResponse):
 class EmailRequest(BaseModel):
     email: EmailStr
 
-class VerifyRequest(BaseModel):
+class SignupRequest(BaseModel):
+    email: EmailStr
+    code: str
+    name: str
+
+class LoginRequest(BaseModel):
     email: EmailStr
     code: str
 
@@ -196,17 +209,38 @@ def send_code(req: EmailRequest, background_tasks: BackgroundTasks):
     background_tasks.add_task(send_verification_email, req.email, verification_code)
     return {"ok": True, "message": "인증 번호 발송 완료"}
 
-@app.post("/auth/verify-code", response_model=StandardResponse)
-def verify_code(req: VerifyRequest, response: Response):
+@app.post("/auth/signup", response_model=StandardResponse)
+def signup(req: SignupRequest, response: Response, db: sqlite3.Connection = Depends(get_db)):
+    existing_user = db.execute("SELECT email FROM users WHERE email = ?", (req.email,)).fetchone()
+    if existing_user:
+        return {"ok": False, "message": "이미 가입된 이메일입니다."}
+        
     stored_code = redis_client.get(req.email)
     if not stored_code or stored_code != req.code:
-        return {"ok": False, "message": "인증 실패"}
+        return {"ok": False, "message": "인증 실패 또는 만료된 코드입니다."}
     redis_client.delete(req.email)
     
-    access_token = create_access_token(data={"sub": req.email})
+    db.execute("INSERT INTO users (email, name) VALUES (?, ?)", (req.email, req.name))
+    db.commit()
+    
+    access_token = create_access_token(data={"sub": req.email, "name": req.name})
     response.set_cookie(key="access_token", value=access_token, httponly=True)
-    return {"ok": True, "message": "인증 성공"}
+    return {"ok": True, "message": "회원가입 성공"}
 
+@app.post("/auth/login", response_model=StandardResponse)
+def login(req: LoginRequest, response: Response, db: sqlite3.Connection = Depends(get_db)):
+    user = db.execute("SELECT name FROM users WHERE email = ?", (req.email,)).fetchone()
+    if not user:
+        return {"ok": False, "message": "가입되지 않은 이메일입니다."}
+
+    stored_code = redis_client.get(req.email)
+    if not stored_code or stored_code != req.code:
+        return {"ok": False, "message": "인증 실패 또는 만료된 코드입니다."}
+    redis_client.delete(req.email)
+    
+    access_token = create_access_token(data={"sub": req.email, "name": user["name"]})
+    response.set_cookie(key="access_token", value=access_token, httponly=True)
+    return {"ok": True, "message": "로그인 성공"}
 
 PAGE_SIZE = 10
 
@@ -270,7 +304,6 @@ def get_grapes_list(
     rows = db.execute(" ".join(query_parts), tuple(params)).fetchall()
     data = [{"id": r["id"], "meta": json.loads(r["meta"]), "nodes": json.loads(r["nodes"]), "raw": r["raw"]} for r in rows]
     return {"ok": True, "message": "Success", "data": data}
-
 
 @app.post("/nodes", response_model=NodeDataCreateResponse)
 def create_node(req: NodeDataCreateRequest, db: sqlite3.Connection = Depends(get_db), current_user: str = Depends(get_current_user)):
